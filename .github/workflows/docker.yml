@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build-and-push:
+    if: github.repository == 'paperclipai/paperclip'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
