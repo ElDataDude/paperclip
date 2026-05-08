@@ -116,6 +116,19 @@ export interface AdapterInvocationMeta {
   env?: Record<string, string>;
   prompt?: string;
   promptMetrics?: Record<string, number>;
+  startupTelemetry?: {
+    startupTokenEstimate: number | null;
+    selectedFiles: Array<{
+      key: string;
+      role: string;
+      path: string;
+      sha256: string;
+      bytes: number;
+      estimatedTokens: number;
+    }>;
+    startupDurationMs: number | null;
+    startupFailureCategory: string | null;
+  };
   context?: Record<string, unknown>;
 }
 

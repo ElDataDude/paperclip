@@ -101,6 +101,23 @@ describe("sandbox callback bridge", () => {
     throw new Error(`Timed out waiting for a JSON file in ${directory}.`);
   }
 
+  async function waitForNoResponseArtifacts(directory: string, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let entries: string[] = [];
+    while (Date.now() < deadline) {
+      entries = await readdir(directory).catch(() => []);
+      const artifacts = entries.filter(
+        (entry) =>
+          entry.endsWith(".json") ||
+          entry.endsWith(".tmp") ||
+          entry.includes(".paperclip-write.lock"),
+      );
+      if (artifacts.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`Timed out waiting for sandbox bridge response artifacts to be removed: ${entries.join(", ")}`);
+  }
+
   afterEach(async () => {
     while (cleanupFns.length > 0) {
       const cleanup = cleanupFns.pop();
@@ -497,6 +514,14 @@ describe("sandbox callback bridge", () => {
     const directories = sandboxCallbackBridgeDirectories(queueDir);
     const bridgeToken = createSandboxCallbackBridgeToken();
     const seenRequestIds: string[] = [];
+    let markHandlerStarted: () => void = () => {};
+    let releaseHandler: () => void = () => {};
+    const handlerStarted = new Promise<void>((resolve) => {
+      markHandlerStarted = resolve;
+    });
+    const handlerRelease = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
 
     const worker = await startSandboxCallbackBridgeWorker({
       client: createCommandManagedSandboxCallbackBridgeQueueClient({
@@ -508,7 +533,8 @@ describe("sandbox callback bridge", () => {
       authorizeRequest: async () => null,
       handleRequest: async (request) => {
         seenRequestIds.push(request.id);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        markHandlerStarted();
+        await handlerRelease;
         return {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -538,12 +564,16 @@ describe("sandbox callback bridge", () => {
       },
     });
 
-    for (let attempt = 0; attempt < 50 && seenRequestIds.length === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    await Promise.race([
+      handlerStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for bridge handler to start.")), 2_000),
+      ),
+    ]);
 
     expect(seenRequestIds).toHaveLength(1);
     await worker.stop({ drainTimeoutMs: 10 });
+    releaseHandler();
 
     const response = await responsePromise;
     expect(response.status).toBe(503);
@@ -551,14 +581,7 @@ describe("sandbox callback bridge", () => {
       error: "Bridge worker stopped before request could be handled.",
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    await expect(readdir(directories.responsesDir)).resolves.toEqual([]);
-    await expect(
-      readdir(directories.responsesDir).then((entries) =>
-        entries.filter((entry) => entry.endsWith(".tmp") || entry.includes(".paperclip-write.lock")),
-      ),
-    ).resolves.toEqual([]);
+    await waitForNoResponseArtifacts(directories.responsesDir);
   });
 
   it("rejects non-JSON request bodies and full queues at the bridge server", async () => {

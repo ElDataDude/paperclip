@@ -66,6 +66,31 @@ async function runPnpm(cwd: string, args: string[]) {
   await execFileAsync("pnpm", args, { cwd });
 }
 
+async function createProvisionPathWithoutPaperclipai() {
+  const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-provision-bin-"));
+  const pnpmPath =
+    process.env.npm_execpath && path.isAbsolute(process.env.npm_execpath)
+      ? process.env.npm_execpath
+      : (await execFileAsync("which", ["pnpm"])).stdout.trim();
+
+  await fs.symlink(process.execPath, path.join(binDir, "node"));
+  await fs.writeFile(
+    path.join(binDir, "pnpm"),
+    [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"paperclipai\" ]; then",
+      "  exit 1",
+      "fi",
+      `exec ${JSON.stringify(pnpmPath)} "$@"`,
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await fs.chmod(path.join(binDir, "pnpm"), 0o755);
+
+  return `${binDir}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+}
+
 async function createTempRepo(defaultBranch = "main") {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-repo-"));
   await runGit(repoRoot, ["init"]);
@@ -1003,6 +1028,8 @@ describe("realizeExecutionWorkspace", () => {
     "provisions worktree-local pnpm node_modules instead of reusing base-repo links",
     async () => {
     const repoRoot = await createTempRepo();
+    const previousPath = process.env.PATH;
+    process.env.PATH = await createProvisionPathWithoutPaperclipai();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "packages", "shared"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "server"), { recursive: true });
@@ -1063,48 +1090,58 @@ describe("realizeExecutionWorkspace", () => {
     await runGit(repoRoot, ["add", "."]);
     await runGit(repoRoot, ["commit", "-m", "Add pnpm workspace fixture"]);
 
-    const workspace = await realizeExecutionWorkspace({
-      base: {
-        baseCwd: repoRoot,
-        source: "project_primary",
-        projectId: "project-1",
-        workspaceId: "workspace-1",
-        repoUrl: null,
-        repoRef: "HEAD",
-      },
-      config: {
-        workspaceStrategy: {
-          type: "git_worktree",
-          branchTemplate: "{{issue.identifier}}-{{slug}}",
-          provisionCommand: "bash ./scripts/provision-worktree.sh",
+    try {
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
         },
-      },
-      issue: {
-        id: "issue-1",
-        identifier: "PAP-551",
-        title: "Provision local workspace dependencies",
-      },
-      agent: {
-        id: "agent-1",
-        name: "Codex Coder",
-        companyId: "company-1",
-      },
-    });
+        config: {
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            provisionCommand: "bash ./scripts/provision-worktree.sh",
+          },
+        },
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-551",
+          title: "Provision local workspace dependencies",
+        },
+        agent: {
+          id: "agent-1",
+          name: "Codex Coder",
+          companyId: "company-1",
+        },
+      });
 
-    expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
-    expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
-    await expect(fs.realpath(path.join(workspace.cwd, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
-    );
-    await expect(fs.realpath(path.join(repoRoot, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(repoRoot, "packages", "shared")),
-    );
+      expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
+      expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
+      await expect(fs.realpath(path.join(workspace.cwd, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
+        await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
+      );
+      await expect(fs.realpath(path.join(repoRoot, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
+        await fs.realpath(path.join(repoRoot, "packages", "shared")),
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
     },
     30_000,
   );
 
   it("provisions successfully when install is needed but there are no symlinked node_modules to move", async () => {
     const repoRoot = await createTempRepo();
+    const previousPath = process.env.PATH;
+    process.env.PATH = await createProvisionPathWithoutPaperclipai();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.writeFile(
       path.join(repoRoot, "package.json"),
@@ -1143,37 +1180,45 @@ describe("realizeExecutionWorkspace", () => {
     await runGit(repoRoot, ["add", "package.json", "pnpm-lock.yaml", "scripts/provision-worktree.sh"]);
     await runGit(repoRoot, ["commit", "-m", "Add minimal provision fixture"]);
 
-    const workspace = await realizeExecutionWorkspace({
-      base: {
-        baseCwd: repoRoot,
-        source: "project_primary",
-        projectId: "project-1",
-        workspaceId: "workspace-1",
-        repoUrl: null,
-        repoRef: "HEAD",
-      },
-      config: {
-        workspaceStrategy: {
-          type: "git_worktree",
-          branchTemplate: "{{issue.identifier}}-{{slug}}",
-          provisionCommand: "bash ./scripts/provision-worktree.sh",
+    try {
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
         },
-      },
-      issue: {
-        id: "issue-1",
-        identifier: "PAP-552",
-        title: "Install without moved symlinks",
-      },
-      agent: {
-        id: "agent-1",
-        name: "Codex Coder",
-        companyId: "company-1",
-      },
-    });
+        config: {
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            provisionCommand: "bash ./scripts/provision-worktree.sh",
+          },
+        },
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-552",
+          title: "Install without moved symlinks",
+        },
+        agent: {
+          id: "agent-1",
+          name: "Codex Coder",
+          companyId: "company-1",
+        },
+      });
 
-    await expect(fs.readFile(path.join(workspace.cwd, ".paperclip", "config.json"), "utf8")).resolves.toContain(
-      "\"database\"",
-    );
+      await expect(fs.readFile(path.join(workspace.cwd, ".paperclip", "config.json"), "utf8")).resolves.toContain(
+        "\"database\"",
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
   }, 30_000);
 
   it("fails instead of writing an unseeded fallback config when worktree init errors after CLI detection succeeds", async () => {
@@ -1188,6 +1233,7 @@ describe("realizeExecutionWorkspace", () => {
       await fs.mkdir(baseRoot, { recursive: true });
       await fs.mkdir(worktreeRoot, { recursive: true });
       await fs.mkdir(fakeBin, { recursive: true });
+      await fs.symlink(process.execPath, path.join(fakeBin, "node"));
       await fs.copyFile(provisionWorktreeScriptPath, scriptPath);
       await fs.chmod(scriptPath, 0o755);
       await fs.writeFile(
@@ -1214,7 +1260,7 @@ describe("realizeExecutionWorkspace", () => {
           cwd: worktreeRoot,
           env: {
             ...process.env,
-            PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+            PATH: `${fakeBin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
             PAPERCLIP_WORKSPACE_BASE_CWD: baseRoot,
             PAPERCLIP_WORKSPACE_CWD: worktreeRoot,
           },
@@ -1244,6 +1290,7 @@ describe("realizeExecutionWorkspace", () => {
       await fs.mkdir(path.join(baseRoot, "node_modules"), { recursive: true });
       await fs.mkdir(worktreeRoot, { recursive: true });
       await fs.mkdir(fakeBin, { recursive: true });
+      await fs.symlink(process.execPath, path.join(fakeBin, "node"));
       await fs.copyFile(provisionWorktreeScriptPath, scriptPath);
       await fs.chmod(scriptPath, 0o755);
       await fs.writeFile(
@@ -1291,7 +1338,7 @@ describe("realizeExecutionWorkspace", () => {
         cwd: worktreeRoot,
         env: {
           ...process.env,
-          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PATH: `${fakeBin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
           PAPERCLIP_WORKSPACE_BASE_CWD: baseRoot,
           PAPERCLIP_WORKSPACE_CWD: worktreeRoot,
         },
@@ -1311,6 +1358,8 @@ describe("realizeExecutionWorkspace", () => {
     "provisions worktree-local pnpm node_modules instead of reusing base-repo links",
     async () => {
     const repoRoot = await createTempRepo();
+    const previousPath = process.env.PATH;
+    process.env.PATH = await createProvisionPathWithoutPaperclipai();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "packages", "shared"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "server"), { recursive: true });
@@ -1371,42 +1420,50 @@ describe("realizeExecutionWorkspace", () => {
     await runGit(repoRoot, ["add", "."]);
     await runGit(repoRoot, ["commit", "-m", "Add pnpm workspace fixture"]);
 
-    const workspace = await realizeExecutionWorkspace({
-      base: {
-        baseCwd: repoRoot,
-        source: "project_primary",
-        projectId: "project-1",
-        workspaceId: "workspace-1",
-        repoUrl: null,
-        repoRef: "HEAD",
-      },
-      config: {
-        workspaceStrategy: {
-          type: "git_worktree",
-          branchTemplate: "{{issue.identifier}}-{{slug}}",
-          provisionCommand: "bash ./scripts/provision-worktree.sh",
+    try {
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
         },
-      },
-      issue: {
-        id: "issue-1",
-        identifier: "PAP-551",
-        title: "Provision local workspace dependencies",
-      },
-      agent: {
-        id: "agent-1",
-        name: "Codex Coder",
-        companyId: "company-1",
-      },
-    });
+        config: {
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            provisionCommand: "bash ./scripts/provision-worktree.sh",
+          },
+        },
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-551",
+          title: "Provision local workspace dependencies",
+        },
+        agent: {
+          id: "agent-1",
+          name: "Codex Coder",
+          companyId: "company-1",
+        },
+      });
 
-    expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
-    expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
-    await expect(fs.realpath(path.join(workspace.cwd, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
-    );
-    await expect(fs.realpath(path.join(repoRoot, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
-      await fs.realpath(path.join(repoRoot, "packages", "shared")),
-    );
+      expect((await fs.lstat(path.join(workspace.cwd, "node_modules"))).isSymbolicLink()).toBe(false);
+      expect((await fs.lstat(path.join(workspace.cwd, "server", "node_modules"))).isSymbolicLink()).toBe(false);
+      await expect(fs.realpath(path.join(workspace.cwd, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
+        await fs.realpath(path.join(workspace.cwd, "packages", "shared")),
+      );
+      await expect(fs.realpath(path.join(repoRoot, "server", "node_modules", "@repo", "shared"))).resolves.toBe(
+        await fs.realpath(path.join(repoRoot, "packages", "shared")),
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
     },
     15_000,
   );

@@ -33,6 +33,7 @@ import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const sshFixtureSupport = await getSshEnvLabSupport();
+const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -360,7 +361,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       expect(released[0]?.lease.status).toBe("released");
     } finally {
     }
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("acquires and releases a fake sandbox run lease through the runtime seam", async () => {
     const { companyId, environment, runId } = await seedEnvironment({

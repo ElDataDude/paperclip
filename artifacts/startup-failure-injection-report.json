@@ -1,0 +1,53 @@
+{
+  "harness": "paperclip.codex_local.startup_failure_injection",
+  "generatedAt": "2026-04-05T20:27:21.823Z",
+  "startedAt": "2026-04-05T20:27:21.819Z",
+  "command": "pnpm qa:startup-failure-injection-harness",
+  "summary": {
+    "status": "pass",
+    "passCount": 2,
+    "failCount": 0,
+    "total": 2
+  },
+  "results": [
+    {
+      "id": "missing-file-path-classification",
+      "status": "pass",
+      "reason": "Startup bundle loader classifies missing file and invalid path deterministically.",
+      "details": {
+        "bundlePath": "/var/folders/37/675qxddj28n9qnjb0s8nzy540000gn/T/paperclip-startup-harness-wonCmt/startup.bundle.json",
+        "observedCategories": [
+          "missing_file",
+          "invalid_file_path"
+        ]
+      }
+    },
+    {
+      "id": "long-memory-pressure-truncation",
+      "status": "pass",
+      "reason": "Pinned-first startup order and truncation behavior are deterministic under low token budget.",
+      "details": {
+        "maxEstimatedTokens": 90,
+        "estimatedTokensBefore": 280,
+        "estimatedTokensAfter": 90,
+        "orderedSectionKeys": [
+          "identity",
+          "task",
+          "safety",
+          "persona",
+          "instructions"
+        ],
+        "includedSectionKeys": [
+          "identity",
+          "task",
+          "safety"
+        ],
+        "droppedSectionKeys": [
+          "persona",
+          "instructions"
+        ],
+        "truncatedSectionKey": "safety"
+      }
+    }
+  ]
+}

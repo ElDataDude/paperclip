@@ -65,6 +65,12 @@ Adapter: codex_local
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to stdin prompt at runtime
+- startupBundleEnabled (boolean, optional): enable deterministic startup bundle loader ("startup.bundle.json") when instructionsFilePath is set (default: true)
+- startupBundlePath (string, optional): absolute/relative path override for startup bundle file (default: "<instructions dir>/startup.bundle.json")
+- startupBundleAutoBuild (boolean, optional): auto-generate missing startup bundle from deterministic startup files (default: true)
+- startupBundleValidateHashes (boolean, optional): validate per-file SHA-256 hashes from the bundle before startup (default: true)
+- startupBundleFallbackToLegacyInstructions (boolean, optional): allow legacy single-file instructions fallback when bundle load/validation fails (default: true)
+- startupTokenBudget (number, optional): estimated startup token budget used for deterministic truncation order (identity/task/safety first; default: 12000)
 - model (string, optional): Codex model id
 - modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh) passed via -c model_reasoning_effort=...
 - promptTemplate (string, optional): run prompt template
@@ -90,4 +96,5 @@ Notes:
 - Some model/tool combinations reject certain effort levels (for example minimal with web search enabled).
 - Fast mode is supported on GPT-5.4 and manual model IDs. When enabled for those models, Paperclip applies \`service_tier="fast"\` and \`features.fast_mode=true\`.
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.
+- Startup telemetry is emitted per run (loaded files/hashes, token-budget estimates, startup duration, and failure category) in run logs and adapter result metadata.
 `;

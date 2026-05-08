@@ -5,6 +5,8 @@ import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { execute } from "@paperclipai/adapter-codex-local/server";
 
+const REMOTE_SANDBOX_TEST_TIMEOUT_MS = 30_000;
+
 async function writeFakeCodexCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -383,7 +385,7 @@ describe("codex execute", () => {
       else process.env.PATH = previousPath;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, REMOTE_SANDBOX_TEST_TIMEOUT_MS);
 
   it("injects structured Paperclip wake payloads into env and prompt", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-wake-"));
@@ -1031,7 +1033,7 @@ describe("codex execute", () => {
       expect(capture.prompt).not.toContain("You are managed instructions.");
       expect(invocationPrompt).toContain("## Paperclip Resume Delta");
       expect(invocationNotes).toContain(
-        "Skipped stdin instruction reinjection because an existing Codex session is being resumed with a wake delta.",
+        "Skipped startup instruction reinjection because an existing Codex session is being resumed with a wake delta.",
       );
       expect(promptMetrics.instructionsChars).toBe(0);
       expect(promptMetrics.heartbeatPromptChars).toBe(0);

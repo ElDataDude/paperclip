@@ -702,7 +702,7 @@ async function exportGitWorkspaceFromSsh(input: {
 async function integrateImportedGitHead(input: {
   localDir: string;
   importedHead: string;
-}): Promise<void> {
+}, attempt = 0): Promise<void> {
   const snapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
   if (!snapshot) return;
 
@@ -721,10 +721,18 @@ async function integrateImportedGitHead(input: {
   }
 
   if (mergeBaseHead === currentHead) {
-    await runLocalGit(input.localDir, ["update-ref", headRef, input.importedHead, currentHead], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    });
+    try {
+      await runLocalGit(input.localDir, ["update-ref", headRef, input.importedHead, currentHead], {
+        timeout: 10_000,
+        maxBuffer: 16 * 1024,
+      });
+    } catch (error) {
+      if (attempt < 3) {
+        await integrateImportedGitHead(input, attempt + 1);
+        return;
+      }
+      throw error;
+    }
     return;
   }
 
@@ -762,10 +770,18 @@ async function integrateImportedGitHead(input: {
       maxBuffer: 64 * 1024,
     },
   );
-  await runLocalGit(input.localDir, ["update-ref", headRef, mergeCommit.stdout.trim(), currentHead], {
-    timeout: 10_000,
-    maxBuffer: 16 * 1024,
-  });
+  try {
+    await runLocalGit(input.localDir, ["update-ref", headRef, mergeCommit.stdout.trim(), currentHead], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    });
+  } catch (error) {
+    if (attempt < 3) {
+      await integrateImportedGitHead(input, attempt + 1);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function clearRemoteDirectory(input: {

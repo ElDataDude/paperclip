@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
@@ -21,6 +22,7 @@ import {
 import {
   asString,
   asNumber,
+  asBoolean,
   parseObject,
   buildPaperclipEnv,
   buildInvocationEnvForLogs,
@@ -43,6 +45,15 @@ import {
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
 } from "./parse.js";
+import {
+  DEFAULT_STARTUP_TOKEN_BUDGET,
+  StartupBundleError,
+  applyStartupTokenBudget,
+  buildStartupBundleFromInstructions,
+  estimateTokenCount,
+  loadStartupBundleSections,
+  type StartupPromptSection,
+} from "./startup-bundle.js";
 import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
@@ -74,6 +85,10 @@ function firstNonEmptyLine(text: string): string {
       .map((line) => line.trim())
       .find(Boolean) ?? ""
   );
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
@@ -546,25 +561,253 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const startupBundleEnabled = asBoolean(config.startupBundleEnabled, true);
+  const startupBundleFallbackToLegacyInstructions = asBoolean(config.startupBundleFallbackToLegacyInstructions, true);
+  const startupBundleValidateHashes = asBoolean(config.startupBundleValidateHashes, true);
+  const startupBundleAutoBuild = asBoolean(config.startupBundleAutoBuild, true);
+  const startupTokenBudget = Math.max(256, Math.floor(asNumber(config.startupTokenBudget, DEFAULT_STARTUP_TOKEN_BUDGET)));
+  const startupBundlePathConfig = asString(config.startupBundlePath, "").trim();
   const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
   let instructionsPrefix = "";
   let instructionsChars = 0;
-  if (instructionsFilePath) {
+  const commandNotes: string[] = [];
+  let startupFatalErrorMessage: string | null = null;
+  const startupTelemetry: Record<string, unknown> = {
+    mode: instructionsFilePath ? "pending" : "none",
+    bundlePath: null,
+    bundleGenerated: false,
+    fallbackUsed: false,
+    failureCategory: null,
+    files: [],
+    tokenBudget: null,
+    startupDurationMs: 0,
+  };
+  const startupStartedAt = Date.now();
+
+  const loadLegacyInstructions = async (reasonLabel: string): Promise<StartupPromptSection | null> => {
+    if (!instructionsFilePath) return null;
     try {
-      const instructionsContents = await fs.readFile(instructionsFilePath, "utf8");
-      instructionsPrefix =
-        `${instructionsContents}\n\n` +
-        `The above agent instructions were loaded from ${instructionsFilePath}. ` +
-        `Resolve any relative file references from ${instructionsDir}.\n\n`;
-      instructionsChars = instructionsPrefix.length;
+      const content = await fs.readFile(instructionsFilePath, "utf8");
+      const bytes = Buffer.byteLength(content, "utf8");
+      commandNotes.push(`Loaded legacy instructions from ${instructionsFilePath} (${reasonLabel}).`);
+      return {
+        key: "legacy",
+        role: "identity",
+        pinned: true,
+        path: instructionsFilePath,
+        sha256: sha256(content),
+        bytes,
+        content,
+        order: 0,
+      };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
-        "stdout",
-        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+        "stderr",
+        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}" (${reasonLabel}): ${reason}\n`,
       );
+      commandNotes.push(`Legacy instructions read failed for ${instructionsFilePath} (${reasonLabel}).`);
+      return null;
+    }
+  };
+
+  if (!instructionsFilePath) {
+    commandNotes.push("No instructionsFilePath configured; startup bundle loader skipped.");
+  } else {
+    const startupBundlePath = path.resolve(
+      startupBundlePathConfig.length > 0
+        ? startupBundlePathConfig
+        : path.join(path.dirname(instructionsFilePath), "startup.bundle.json"),
+    );
+    startupTelemetry.bundlePath = startupBundlePath;
+    try {
+      let bundleResult:
+        | Awaited<ReturnType<typeof loadStartupBundleSections>>
+        | Awaited<ReturnType<typeof buildStartupBundleFromInstructions>>
+        | null = null;
+
+      if (startupBundleEnabled) {
+        try {
+          bundleResult = await loadStartupBundleSections({
+            bundlePath: startupBundlePath,
+            validateHashes: startupBundleValidateHashes,
+          });
+          startupTelemetry.mode = "bundle";
+          commandNotes.push(`Loaded startup bundle from ${startupBundlePath}.`);
+        } catch (err) {
+          if (err instanceof StartupBundleError && err.category === "missing_bundle" && startupBundleAutoBuild) {
+            bundleResult = await buildStartupBundleFromInstructions({
+              instructionsFilePath,
+              bundlePath: startupBundlePath,
+              maxEstimatedTokens: startupTokenBudget,
+            });
+            startupTelemetry.mode = "bundle_generated";
+            startupTelemetry.bundleGenerated = true;
+            commandNotes.push(`Generated startup bundle at ${startupBundlePath}.`);
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      let sourceSections = bundleResult?.sections ?? null;
+      if (!sourceSections) {
+        const legacySection = await loadLegacyInstructions(
+          startupBundleEnabled ? "bundle-disabled-or-unavailable" : "bundle-disabled",
+        );
+        sourceSections = legacySection ? [legacySection] : [];
+        if (!startupBundleEnabled) startupTelemetry.mode = "legacy_bundle_disabled";
+      }
+
+      if (sourceSections.length > 0) {
+        const budgetPlan = applyStartupTokenBudget({
+          sections: sourceSections,
+          maxEstimatedTokens: startupTokenBudget,
+        });
+        const trimmedSections = budgetPlan.includedSections;
+        if (trimmedSections.length > 0) {
+          const contentBlock = trimmedSections
+            .map((section) => section.content.trimEnd())
+            .join("\n\n");
+          const sourceLabel = bundleResult
+            ? `startup bundle ${startupBundlePath}`
+            : `legacy instructions file ${instructionsFilePath}`;
+          instructionsPrefix =
+            `${contentBlock}\n\n` +
+            `The above startup instructions were loaded from ${sourceLabel}. ` +
+            `Resolve any relative file references from ${instructionsDir}.\n\n`;
+        }
+
+        startupTelemetry.files = sourceSections.map((section) => ({
+          key: section.key,
+          role: section.role,
+          pinned: section.pinned,
+          path: section.path,
+          sha256: section.sha256,
+          bytes: section.bytes,
+          estimatedTokens: estimateTokenCount(section.content),
+        }));
+        startupTelemetry.tokenBudget = {
+          maxEstimatedTokens: budgetPlan.maxEstimatedTokens,
+          estimatedTokensBefore: budgetPlan.estimatedTokensBefore,
+          estimatedTokensAfter: budgetPlan.estimatedTokensAfter,
+          orderedSectionKeys: budgetPlan.orderedSectionKeys,
+          droppedSectionKeys: budgetPlan.droppedSectionKeys,
+          truncatedSectionKey: budgetPlan.truncatedSectionKey,
+        };
+
+        if (budgetPlan.truncatedSectionKey || budgetPlan.droppedSectionKeys.length > 0) {
+          await onLog(
+            "stderr",
+            `[paperclip] Startup token budget applied (${budgetPlan.estimatedTokensAfter}/${budgetPlan.maxEstimatedTokens} est tokens). ` +
+              `truncated=${budgetPlan.truncatedSectionKey ?? "none"} dropped=${budgetPlan.droppedSectionKeys.join(",") || "none"}\n`,
+          );
+        }
+
+        commandNotes.push(
+          `Startup token budget estimate: ${budgetPlan.estimatedTokensAfter}/${budgetPlan.maxEstimatedTokens}.`,
+        );
+      } else {
+        startupTelemetry.mode = "no_instructions_loaded";
+        commandNotes.push("No startup instructions were loaded (continuing with promptTemplate only).");
+      }
+    } catch (err) {
+      const failureCategory = err instanceof StartupBundleError ? err.category : "invalid_bundle_schema";
+      const reason = err instanceof Error ? err.message : String(err);
+      startupTelemetry.failureCategory = failureCategory;
+
+      if (!startupBundleFallbackToLegacyInstructions) {
+        startupFatalErrorMessage =
+          `Startup bundle initialization failed (${failureCategory}): ${reason}. ` +
+          "Set startupBundleFallbackToLegacyInstructions=true to continue with legacy instructions.";
+        commandNotes.push("Startup bundle fallback disabled; run will fail before adapter execution.");
+      }
+
+      startupTelemetry.fallbackUsed = true;
+      startupTelemetry.mode = "legacy_fallback";
+      await onLog(
+        "stderr",
+        `[paperclip] Startup bundle failed (${failureCategory}); falling back to legacy instructions. ${reason}\n`,
+      );
+
+      const legacySection = await loadLegacyInstructions("bundle-fallback");
+      if (legacySection) {
+        const budgetPlan = applyStartupTokenBudget({
+          sections: [legacySection],
+          maxEstimatedTokens: startupTokenBudget,
+        });
+        const legacyContent = budgetPlan.includedSections[0]?.content ?? "";
+        if (legacyContent) {
+          instructionsPrefix =
+            `${legacyContent.trimEnd()}\n\n` +
+            `The above startup instructions were loaded from ${instructionsFilePath}. ` +
+            `Resolve any relative file references from ${instructionsDir}.\n\n`;
+        }
+        startupTelemetry.files = [{
+          key: legacySection.key,
+          role: legacySection.role,
+          pinned: legacySection.pinned,
+          path: legacySection.path,
+          sha256: legacySection.sha256,
+          bytes: legacySection.bytes,
+          estimatedTokens: estimateTokenCount(legacySection.content),
+        }];
+        startupTelemetry.tokenBudget = {
+          maxEstimatedTokens: budgetPlan.maxEstimatedTokens,
+          estimatedTokensBefore: budgetPlan.estimatedTokensBefore,
+          estimatedTokensAfter: budgetPlan.estimatedTokensAfter,
+          orderedSectionKeys: budgetPlan.orderedSectionKeys,
+          droppedSectionKeys: budgetPlan.droppedSectionKeys,
+          truncatedSectionKey: budgetPlan.truncatedSectionKey,
+        };
+      }
+    } finally {
+      startupTelemetry.startupDurationMs = Date.now() - startupStartedAt;
+      await onLog("stderr", `[paperclip] startup telemetry: ${JSON.stringify(startupTelemetry)}\n`);
     }
   }
+
+  const startupTelemetryContract = (() => {
+    const tokenBudget = parseObject(startupTelemetry.tokenBudget);
+    const estimatedTokensAfter =
+      typeof tokenBudget.estimatedTokensAfter === "number" && Number.isFinite(tokenBudget.estimatedTokensAfter)
+        ? Math.max(0, Math.floor(tokenBudget.estimatedTokensAfter))
+        : null;
+    const startupDurationMs =
+      typeof startupTelemetry.startupDurationMs === "number" && Number.isFinite(startupTelemetry.startupDurationMs)
+        ? Math.max(0, Math.floor(startupTelemetry.startupDurationMs))
+        : null;
+    const startupFailureCategory =
+      typeof startupTelemetry.failureCategory === "string" && startupTelemetry.failureCategory.trim().length > 0
+        ? startupTelemetry.failureCategory
+        : null;
+    const selectedFiles = Array.isArray(startupTelemetry.files)
+      ? startupTelemetry.files
+          .filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+          .map((file) => ({
+            key: typeof file.key === "string" ? file.key : "",
+            role: typeof file.role === "string" ? file.role : "instructions",
+            path: typeof file.path === "string" ? file.path : "",
+            sha256: typeof file.sha256 === "string" ? file.sha256 : "",
+            bytes:
+              typeof file.bytes === "number" && Number.isFinite(file.bytes)
+                ? Math.max(0, Math.floor(file.bytes))
+                : 0,
+            estimatedTokens:
+              typeof file.estimatedTokens === "number" && Number.isFinite(file.estimatedTokens)
+                ? Math.max(0, Math.floor(file.estimatedTokens))
+                : 0,
+          }))
+      : [];
+
+    return {
+      startupTokenEstimate: estimatedTokensAfter,
+      selectedFiles,
+      startupDurationMs,
+      startupFailureCategory,
+    };
+  })();
+
   const repoAgentsNote =
     "Codex exec automatically applies repo-scoped AGENTS.md instructions from the current workspace; Paperclip does not currently suppress that discovery.";
   const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
@@ -595,57 +838,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           continuationSummaryBody,
         })
       : "";
-  const commandNotes = (() => {
-    if (!instructionsFilePath) {
-      const notes = [repoAgentsNote];
-      if (forceSaferInvocation) {
-        notes.push("Codex transient fallback requested safer invocation settings for this retry.");
-      }
-      if (forceFreshSession) {
-        notes.push("Codex transient fallback forced a fresh session with a continuation handoff.");
-      }
-      return notes;
+  if (instructionsPrefix.length > 0) {
+    if (shouldUseResumeDeltaPrompt) {
+      commandNotes.push(
+        "Skipped startup instruction reinjection because an existing Codex session is being resumed with a wake delta.",
+      );
+    } else {
+      commandNotes.push(
+        `Prepended startup instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
+      );
     }
-    if (instructionsPrefix.length > 0) {
-      if (shouldUseResumeDeltaPrompt) {
-        const notes = [
-          `Loaded agent instructions from ${instructionsFilePath}`,
-          "Skipped stdin instruction reinjection because an existing Codex session is being resumed with a wake delta.",
-          repoAgentsNote,
-        ];
-        if (forceSaferInvocation) {
-          notes.push("Codex transient fallback requested safer invocation settings for this retry.");
-        }
-        if (forceFreshSession) {
-          notes.push("Codex transient fallback forced a fresh session with a continuation handoff.");
-        }
-        return notes;
-      }
-      const notes = [
-        `Loaded agent instructions from ${instructionsFilePath}`,
-        `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
-        repoAgentsNote,
-      ];
-      if (forceSaferInvocation) {
-        notes.push("Codex transient fallback requested safer invocation settings for this retry.");
-      }
-      if (forceFreshSession) {
-        notes.push("Codex transient fallback forced a fresh session with a continuation handoff.");
-      }
-      return notes;
-    }
-    const notes = [
-      `Configured instructionsFilePath ${instructionsFilePath}, but file could not be read; continuing without injected instructions.`,
-      repoAgentsNote,
-    ];
-    if (forceSaferInvocation) {
-      notes.push("Codex transient fallback requested safer invocation settings for this retry.");
-    }
-    if (forceFreshSession) {
-      notes.push("Codex transient fallback forced a fresh session with a continuation handoff.");
-    }
-    return notes;
-  })();
+  } else if (instructionsFilePath) {
+    commandNotes.push(
+      `Configured instructionsFilePath ${instructionsFilePath}, but no startup instructions were loaded; continuing without injected instructions.`,
+    );
+  }
+  commandNotes.push(repoAgentsNote);
+  if (forceSaferInvocation) {
+    commandNotes.push("Codex transient fallback requested safer invocation settings for this retry.");
+  }
+  if (forceFreshSession) {
+    commandNotes.push("Codex transient fallback forced a fresh session with a continuation handoff.");
+  }
   const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
   const prompt = joinPromptSections([
@@ -656,14 +870,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionHandoffNote,
     renderedPrompt,
   ]);
-  const promptMetrics = {
+  const promptMetrics: Record<string, number> = {
     promptChars: prompt.length,
     instructionsChars,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
     wakePromptChars: wakePrompt.length,
     sessionHandoffChars: sessionHandoffNote.length,
     heartbeatPromptChars: renderedPrompt.length,
+    startupInstructionsChars: promptInstructionsPrefix.length,
   };
+  if (typeof startupTelemetryContract.startupTokenEstimate === "number") {
+    promptMetrics.startupTokenEstimate = startupTelemetryContract.startupTokenEstimate;
+  }
+  if (typeof startupTelemetryContract.startupDurationMs === "number") {
+    promptMetrics.startupDurationMs = startupTelemetryContract.startupDurationMs;
+  }
 
   const runAttempt = async (resumeSessionId: string | null) => {
     const execArgs = buildCodexExecArgs(
@@ -688,8 +909,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         env: loggedEnv,
         prompt,
         promptMetrics,
+        startupTelemetry: startupTelemetryContract,
         context,
       });
+    }
+    if (startupFatalErrorMessage) {
+      throw new Error(startupFatalErrorMessage);
     }
 
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
@@ -801,6 +1026,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resultJson: {
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
+        startupTelemetry,
+        startupTelemetryContract,
         ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
         ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
         ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),

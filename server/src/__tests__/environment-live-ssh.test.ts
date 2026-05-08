@@ -88,6 +88,7 @@ async function startEnvLabForTest(): Promise<{
 }
 
 let envLabCleanup: (() => Promise<void>) | null = null;
+const LIVE_SSH_TEST_TIMEOUT_MS = 30_000;
 
 /**
  * Resolve an SSH connection config from (in order):
@@ -179,5 +180,5 @@ describeLiveSsh("live SSH environment smoke", () => {
     expect(result.stdout).toContain(config.remoteWorkspacePath);
     expect(result.stdout).toContain("git");
     expect(result.stdout).toContain("tar");
-  });
+  }, LIVE_SSH_TEST_TIMEOUT_MS);
 });

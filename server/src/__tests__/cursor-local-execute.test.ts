@@ -5,6 +5,8 @@ import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
 
+const REMOTE_SANDBOX_TEST_TIMEOUT_MS = 30_000;
+
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -385,7 +387,7 @@ describe("cursor execute", () => {
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, REMOTE_SANDBOX_TEST_TIMEOUT_MS);
 
   it("keeps explicit command overrides for remote sandbox execution", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-sandbox-explicit-"));
@@ -444,5 +446,5 @@ describe("cursor execute", () => {
       else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
+  }, REMOTE_SANDBOX_TEST_TIMEOUT_MS);
 });

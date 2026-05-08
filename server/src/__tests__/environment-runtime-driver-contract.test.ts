@@ -32,6 +32,7 @@ import { secretService } from "../services/secrets.js";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const sshFixtureSupport = await getSshEnvLabSupport();
+const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -278,5 +279,5 @@ describeEmbeddedPostgres("environment runtime driver contract", () => {
         });
       },
     });
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 });

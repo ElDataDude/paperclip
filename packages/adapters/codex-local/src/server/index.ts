@@ -13,6 +13,20 @@ export {
   fetchWithTimeout,
   codexHomeDir,
 } from "./quota.js";
+export {
+  DEFAULT_STARTUP_TOKEN_BUDGET,
+  StartupBundleError,
+  applyStartupTokenBudget,
+  buildStartupBundleFromInstructions,
+  estimateTokenCount,
+  loadStartupBundleSections,
+  type StartupBundleDocument,
+  type StartupBundleFileEntry,
+  type StartupBundleFailureCategory,
+  type StartupBundleRole,
+  type StartupPromptPlan,
+  type StartupPromptSection,
+} from "./startup-bundle.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 
 function readNonEmptyString(value: unknown): string | null {

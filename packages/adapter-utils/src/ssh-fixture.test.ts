@@ -17,6 +17,8 @@ import {
 } from "./ssh.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 
+const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
+
 async function git(cwd: string, args: string[]): Promise<string> {
   return await new Promise((resolve, reject) => {
     execFile("git", ["-C", cwd, ...args], (error, stdout, stderr) => {
@@ -69,7 +71,7 @@ describe("ssh env-lab fixture", () => {
 
     const stopped = await readSshEnvLabFixtureStatus(statePath);
     expect(stopped.running).toBe(false);
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("forwards stdin to remote SSH commands", async () => {
     const support = await getSshEnvLabSupport();
@@ -105,7 +107,7 @@ describe("ssh env-lab fixture", () => {
     );
 
     expect(result.stdout).toBe("hello over ssh stdin\n");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("does not treat an unrelated reused pid as the running fixture", async () => {
     const support = await getSshEnvLabSupport();
@@ -137,7 +139,7 @@ describe("ssh env-lab fixture", () => {
     expect(restarted.pid).not.toBe(process.pid);
 
     await stopSshEnvLabFixture(statePath);
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("rejects invalid environment variable keys when constructing SSH spawn targets", async () => {
     await expect(
@@ -159,7 +161,7 @@ describe("ssh env-lab fixture", () => {
         },
       }),
     ).rejects.toThrow("Invalid SSH environment variable key: BAD KEY");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("syncs a local directory into the remote fixture workspace", async () => {
     const support = await getSshEnvLabSupport();
@@ -199,7 +201,7 @@ describe("ssh env-lab fixture", () => {
 
     expect(result.stdout).toContain("hello from paperclip");
     expect(result.stdout).not.toContain("appledouble-present");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("can dereference local symlinks while syncing to the remote fixture", async () => {
     const support = await getSshEnvLabSupport();
@@ -242,7 +244,7 @@ describe("ssh env-lab fixture", () => {
 
     expect(result.stdout).toContain("regular");
     expect(result.stdout).toContain("{\"token\":\"secret\"}");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips a git workspace through the SSH fixture", async () => {
     const support = await getSshEnvLabSupport();
@@ -308,7 +310,7 @@ describe("ssh env-lab fixture", () => {
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toBe("remote update");
     expect(await git(localRepo, ["status", "--short"])).toContain("M tracked.txt");
     expect(await git(localRepo, ["status", "--short"])).not.toContain("._tracked.txt");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("preserves both concurrent SSH restores in a shared git workspace", async () => {
     const support = await getSshEnvLabSupport();
@@ -372,7 +374,7 @@ describe("ssh env-lab fixture", () => {
 
     await expect(readFile(path.join(localRepo, "run-a.txt"), "utf8")).resolves.toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "run-b.txt"), "utf8")).resolves.toBe("from run b\n");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("preserves nested per-run files across sequential SSH restores with stale baselines", async () => {
     const support = await getSshEnvLabSupport();
@@ -434,7 +436,7 @@ describe("ssh env-lab fixture", () => {
       .toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "manual-qa/environment-matrix/ssh/codex_local.md"), "utf8")).resolves
       .toBe("from run b\n");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips remote git commits through the managed runtime restore path", async () => {
     const support = await getSshEnvLabSupport();
@@ -482,7 +484,7 @@ describe("ssh env-lab fixture", () => {
 
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toBe("remote update");
     await expect(readFile(path.join(localRepo, "tracked.txt"), "utf8")).resolves.toBe("dirty remote\n");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("merges concurrent remote commits through the managed runtime restore path", async () => {
     const support = await getSshEnvLabSupport();
@@ -549,5 +551,5 @@ describe("ssh env-lab fixture", () => {
     const recentSubjects = await git(localRepo, ["log", "--pretty=%s", "-3"]);
     expect(recentSubjects).toContain("remote update a");
     expect(recentSubjects).toContain("remote update b");
-  });
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 });

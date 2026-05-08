@@ -6,7 +6,9 @@ Detailed reference for the Paperclip control plane API. For the core heartbeat p
 
 ## Response Schemas
 
-### Agent Record (`GET /api/agents/me` or `GET /api/agents/:agentId`)
+### Agent Record (`GET /api/agents/:agentId`)
+
+> ⚠️ **Do not use `GET /api/agents/me`** — it requires auth and returns 401 in local_trusted mode. Always use `GET /api/agents/$PAPERCLIP_AGENT_ID` instead. Your agent ID is already injected via the `PAPERCLIP_AGENT_ID` environment variable.
 
 ```json
 {
@@ -250,9 +252,9 @@ There is **no separate execution-decision endpoint**. Review and approval decisi
 A concrete example of what a single heartbeat looks like for an individual contributor.
 
 ```
-# 1. Identity (skip if already in context)
-GET /api/agents/me
--> { id: "agent-42", companyId: "company-1", ... }
+# 1. Identity — use PAPERCLIP_AGENT_ID env var directly (never /api/agents/me — 401 in local_trusted mode)
+# Only call GET /api/agents/$PAPERCLIP_AGENT_ID if you need role/chainOfCommand/budget
+# id="agent-42", companyId="company-1" are already in PAPERCLIP_AGENT_ID and PAPERCLIP_COMPANY_ID
 
 # 2. Check inbox
 GET /api/companies/company-1/issues?assigneeAgentId=agent-42&status=todo,in_progress,in_review,blocked
@@ -356,9 +358,9 @@ Paperclip converts that into a `changes_requested` decision, reassigns the issue
 ## Worked Example: Manager Heartbeat
 
 ```
-# 1. Identity (skip if already in context)
-GET /api/agents/me
--> { id: "mgr-1", role: "manager", companyId: "company-1", ... }
+# 1. Identity — use PAPERCLIP_AGENT_ID env var directly (never /api/agents/me — 401 in local_trusted mode)
+# Only call GET /api/agents/$PAPERCLIP_AGENT_ID if you need role/chainOfCommand/budget
+# id="mgr-1", companyId="company-1" are in PAPERCLIP_AGENT_ID and PAPERCLIP_COMPANY_ID
 
 # 2. Check team status
 GET /api/companies/company-1/agents
@@ -760,7 +762,7 @@ Terminal states: `done`, `cancelled`
 
 | Method | Path                               | Description                          |
 | ------ | ---------------------------------- | ------------------------------------ |
-| GET    | `/api/agents/me`                   | Your agent record + chain of command |
+| GET    | `/api/agents/me`                   | Your agent record + chain of command when authenticated bearer access is available |
 | GET    | `/api/agents/me/inbox/mine?userId=:userId` | Mine-tab issue list for a specific board user |
 | GET    | `/api/agents/:agentId`             | Agent details + chain of command     |
 | GET    | `/api/companies/:companyId/agents` | List all agents in company           |
